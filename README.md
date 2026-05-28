@@ -58,6 +58,42 @@ src/emergency_detection/
 
 Large local audio files and trained model artifacts are ignored by git by default.
 
+## Data Setup
+
+Audio datasets are not stored in the repository. Run the following steps to set up the training data locally after cloning.
+
+**1. Download ESC-50**
+
+```bash
+cd data
+curl -L -o ESC-50.zip https://github.com/karolpiczak/ESC-50/archive/refs/heads/master.zip
+unzip ESC-50.zip
+cd ..
+```
+
+**2. Copy siren and glass breaking clips**
+
+```bash
+cp data/ESC-50-master/audio/*-39.wav data/raw/glass_breaking/
+cp data/ESC-50-master/audio/*-42.wav data/raw/siren/
+```
+
+**3. Add fire/smoke alarm and scream clips**
+
+Download WAV files from FreeSound or a similar source and place them in:
+
+```text
+data/raw/fire_or_smoke_alarm/
+data/raw/scream/
+```
+
+**4. Extract embeddings and train the classifier**
+
+```bash
+python scripts/batch_extract_embeddings.py
+python scripts/train_classifier.py
+```
+
 ## ML Plan
 
 Initial model design:
