@@ -87,12 +87,28 @@ data/raw/fire_or_smoke_alarm/
 data/raw/scream/
 ```
 
-**4. Extract embeddings and train the classifier**
+**4. Record background noise**
+
+```bash
+python scripts/record_background.py
+```
+
+Stay quiet and let it record 40 seconds of ambient room noise. Move around, type, or talk normally — varied background noise improves the model.
+
+**5. Extract embeddings and train the classifier**
 
 ```bash
 python scripts/batch_extract_embeddings.py
 python scripts/train_classifier.py
 ```
+
+**6. Run live detection (terminal)**
+
+```bash
+python scripts/live_detection.py
+```
+
+Press `Ctrl+C` to stop.
 
 ## ML Plan
 
