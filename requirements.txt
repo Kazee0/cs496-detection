@@ -1,0 +1,10 @@
+numpy
+scipy
+sounddevice
+librosa
+tensorflow
+tensorflow-hub
+setuptools<81
+scikit-learn
+matplotlib
+streamlit

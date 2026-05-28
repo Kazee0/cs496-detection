@@ -1,0 +1,32 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+.Python
+.venv/
+venv/
+env/
+
+# Tooling
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# OS / editors
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+
+# Project outputs
+models/*.keras
+models/*.h5
+models/*.pkl
+models/*.joblib
+outputs/
+logs/
+
+# Large local datasets should stay out of git by default.
+data/raw/
+data/processed/
+data/external/
