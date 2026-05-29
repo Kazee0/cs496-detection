@@ -95,14 +95,27 @@ python scripts/record_background.py
 
 Stay quiet and let it record 40 seconds of ambient room noise. Move around, type, or talk normally — varied background noise improves the model.
 
-**5. Extract embeddings and train the classifier**
+**5. Create class folders (if needed)**
+
+```bash
+python scripts/make_project_dirs.py
+```
+
+**6. Extract embeddings and train the classifier**
 
 ```bash
 python scripts/batch_extract_embeddings.py
 python scripts/train_classifier.py
 ```
 
-**6. Run live detection (terminal)**
+**7. Evaluate the model**
+
+```bash
+python scripts/evaluate_classifier.py --plot
+python scripts/benchmark_detection_latency.py
+```
+
+**8. Run live detection (terminal)**
 
 ```bash
 python scripts/live_detection.py
@@ -176,15 +189,16 @@ Expected demo behavior:
 
 ## Evaluation Plan
 
-The evaluation should measure both model quality and live system usability.
+Scripts implement the metrics below on a held-out 20% test split (same seed as training).
 
-Suggested metrics:
+| Metric | Script |
+|--------|--------|
+| Accuracy, per-class P/R/F1, confusion matrix | `scripts/evaluate_classifier.py` |
+| Emergency-class precision/recall (grouped) | `scripts/evaluate_classifier.py` |
+| Normal false positive rate (incl. alert threshold) | `scripts/evaluate_classifier.py --threshold 0.75` |
+| Detection latency per 1s window | `scripts/benchmark_detection_latency.py` |
 
-- Accuracy across all target classes
-- Precision and recall for emergency classes
-- Confusion matrix between similar sounds
-- False positive rate on normal background noise
-- Detection latency during live microphone input
+Outputs: `outputs/evaluation_report.json`, optional `outputs/confusion_matrix.png`, `outputs/latency_ms.txt`.
 
 Suggested test cases:
 
@@ -235,20 +249,20 @@ The smoke test loads YAMNet from TensorFlow Hub and runs inference on a syntheti
 
 ### Phase 5: Testing and Demo Polish
 
-- Run evaluation on held-out samples.
+- [x] Held-out evaluation: `scripts/evaluate_classifier.py`
+- [x] Latency benchmark: `scripts/benchmark_detection_latency.py`
 - Test live detection with demo sound sources.
 - Tune thresholds for fewer false positives.
 - Prepare final demo flow and presentation notes.
 
 ## Repository Status
 
-Current repository contents:
+| Area | Status |
+|------|--------|
+| Data setup | Manual ESC-50 download + copy (`README` Data Setup); `record_background.py` for normal class |
+| Embeddings / train | `batch_extract_embeddings.py`, `train_classifier.py` |
+| Live detection | `live_detection.py` (mic + classifier + cooldown) |
+| Evaluation | `evaluate_classifier.py`, `benchmark_detection_latency.py` |
+| Dashboard POC | Stashed locally (`git stash list` → `WIP: dashboard POC UI`) |
 
-- `Project Proposal.pdf`: Original project proposal
-- `README.md`: Project plan and implementation outline
-- `requirements.txt`: Planned Python dependencies
-- `src/emergency_detection/`: Shared project package
-- `scripts/`: Setup and environment utility scripts
-- `data/`, `models/`, `notebooks/`: Working folders for data, artifacts, and experiments
-
-Code, datasets, trained model files, and demo instructions will be added as implementation progresses.
+ESC-50 on `main` uses category-specific filenames (`*-39.wav` glass, `*-42.wav` siren) instead of the removed `prepare_esc50_subset.py` script (fold-based train/val/test splits).

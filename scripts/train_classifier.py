@@ -33,10 +33,19 @@ def main() -> int:
 
     print(f"Loaded {embeddings.shape[0]} samples, {len(class_names)} classes: {class_names}")
 
-    X_train, X_test, y_train, y_test = train_test_split(
-        embeddings, labels, test_size=0.2, random_state=42, stratify=labels
+    indices = np.arange(len(labels))
+    train_indices, test_indices = train_test_split(
+        indices,
+        test_size=0.2,
+        random_state=42,
+        stratify=labels,
     )
+    X_train, X_test = embeddings[train_indices], embeddings[test_indices]
+    y_train, y_test = labels[train_indices], labels[test_indices]
     print(f"Train: {len(X_train)}  Test: {len(X_test)}")
+
+    PROCESSED_DIR.mkdir(parents=True, exist_ok=True)
+    np.save(PROCESSED_DIR / "test_indices.npy", test_indices)
 
     scaler = StandardScaler()
     X_train = scaler.fit_transform(X_train)
