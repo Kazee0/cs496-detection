@@ -18,7 +18,7 @@ from emergency_detection.config import ALERT_LABELS
 
 @dataclass(frozen=True)
 class EvaluationReport:
-    """Structured metrics aligned with README evaluation plan."""
+    """Structured metrics aligned with evaluation plan."""
 
     class_names: list[str]
     accuracy: float

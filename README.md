@@ -71,29 +71,46 @@ unzip ESC-50.zip
 cd ..
 ```
 
-**2. Copy siren and glass breaking clips**
+**2. Copy ESC-50 clips (glass, siren, normal background)**
+
+```bash
+python scripts/copy_esc50_clips.py glass_breaking siren normal_background
+```
+
+Or manually:
 
 ```bash
 cp data/ESC-50-master/audio/*-39.wav data/raw/glass_breaking/
 cp data/ESC-50-master/audio/*-42.wav data/raw/siren/
+python scripts/copy_esc50_clips.py normal_background
 ```
+
+`normal_background` pulls diverse everyday ESC-50 categories (rain, wind, typing, etc.) as hard negatives. Optional: add room tone with `python scripts/record_background.py`.
 
 **3. Add fire/smoke alarm and scream clips**
 
-Download WAV files from FreeSound or a similar source and place them in:
+Download your team folders from Google Drive (`CS396/smoke_alarm`, `CS396/screams`) to your machine, then:
+
+```bash
+python scripts/import_team_audio.py --source /path/to/CS396
+```
+
+Or copy WAV files manually into:
 
 ```text
 data/raw/fire_or_smoke_alarm/
 data/raw/scream/
 ```
 
-**4. Record background noise**
+Do not commit audio to the repository (`data/raw/` is gitignored).
+
+**4. Optional: record room background**
 
 ```bash
 python scripts/record_background.py
 ```
 
-Stay quiet and let it record 40 seconds of ambient room noise. Move around, type, or talk normally — varied background noise improves the model.
+Adds mic-captured ambient noise on top of ESC-50 `normal_background` clips (step 2).
 
 **5. Create class folders (if needed)**
 
