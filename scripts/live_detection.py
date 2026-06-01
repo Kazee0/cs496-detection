@@ -28,7 +28,8 @@ from emergency_detection.config import (
     DEFAULT_ALERT_THRESHOLD,
     DEFAULT_ALERT_COOLDOWN_SECONDS,
 )
-from emergency_detection.yamnet import load_yamnet_model, run_yamnet
+from emergency_detection.inference import classify_window
+from emergency_detection.yamnet import load_yamnet_model
 
 MODELS_DIR = PROJECT_ROOT / "models"
 
@@ -51,11 +52,6 @@ def load_model(models_dir: Path):
     return data["classifier"], data["scaler"], data["class_names"]
 
 
-def predict(embedding: np.ndarray, clf, scaler, class_names: list[str]) -> tuple[str, float]:
-    x = scaler.transform(embedding.reshape(1, -1))
-    proba = clf.predict_proba(x)[0]
-    index = int(np.argmax(proba))
-    return class_names[index], float(proba[index])
 
 
 def main() -> int:
@@ -91,9 +87,7 @@ def main() -> int:
         samples_since_hop = 0
 
         waveform = np.array(buffer, dtype=np.float32)
-        output = run_yamnet(waveform, yamnet_model=yamnet)
-        embedding = output.embeddings.mean(axis=0)
-        label, confidence = predict(embedding, clf, scaler, class_names)
+        label, confidence, _ = classify_window(waveform, yamnet, clf, scaler, class_names)
 
         now = time.time()
         is_alert = label in ALERT_LABELS and confidence >= args.threshold
