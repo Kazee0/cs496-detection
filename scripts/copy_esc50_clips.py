@@ -48,6 +48,19 @@ ESC50_NORMAL_CATEGORIES: tuple[str, ...] = (
     "pouring_water",
     "mouse_click",
     "train",
+    # Human voice — common in video playback; helps avoid false alarms during TV/speech
+    "laughing",
+    "crying_baby",
+    "sneezing",
+    "coughing",
+    "breathing",
+    # Short transient impacts — similar embedding neighborhood to glass_breaking
+    "clapping",
+    "door_wood_knock",
+    "can_opening",
+    "clock_tick",
+    # Ambient non-emergency backgrounds
+    "crackling_fire",
 )
 
 

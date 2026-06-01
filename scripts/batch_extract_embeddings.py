@@ -18,6 +18,7 @@ PROJECT_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(PROJECT_ROOT / "src"))
 
 from emergency_detection.audio import load_wav_mono
+from emergency_detection.inference import energy_weighted_embedding
 from emergency_detection.yamnet import load_yamnet_model, run_yamnet
 
 RAW_DIR = PROJECT_ROOT / "data" / "raw"
@@ -46,9 +47,8 @@ def main() -> int:
             try:
                 waveform = load_wav_mono(wav_path)
                 output = run_yamnet(waveform, yamnet_model=model)
-                # Average embeddings across frames to get one vector per clip
-                mean_embedding = output.embeddings.mean(axis=0)
-                all_embeddings.append(mean_embedding)
+                embedding = energy_weighted_embedding(waveform, output.embeddings)
+                all_embeddings.append(embedding)
                 all_labels.append(label_index)
                 print(f"  ok: {wav_path.name}")
             except Exception as exc:
