@@ -197,5 +197,9 @@ def sklearn_classification_report_text(
     class_names: list[str],
 ) -> str:
     return classification_report(
-        y_true, y_pred, target_names=class_names, zero_division=0
+        y_true,
+        y_pred,
+        labels=list(range(len(class_names))),
+        target_names=class_names,
+        zero_division=0,
     )

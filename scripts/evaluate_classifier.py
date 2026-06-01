@@ -109,6 +109,15 @@ def save_confusion_plot(report, output_path: Path) -> None:
     plt.close(figure)
 
 
+def predict_proba_by_class(clf, X_test_scaled: np.ndarray, class_count: int) -> np.ndarray:
+    raw_proba = clf.predict_proba(X_test_scaled)
+    proba = np.zeros((raw_proba.shape[0], class_count), dtype=raw_proba.dtype)
+    for column_index, class_index in enumerate(clf.classes_):
+        if 0 <= class_index < class_count:
+            proba[:, int(class_index)] = raw_proba[:, column_index]
+    return proba
+
+
 def main() -> int:
     args = parse_args()
 
@@ -133,7 +142,7 @@ def main() -> int:
     )
     X_test_scaled = scaler.transform(X_test)
     y_pred = clf.predict(X_test_scaled)
-    y_proba = clf.predict_proba(X_test_scaled)
+    y_proba = predict_proba_by_class(clf, X_test_scaled, len(class_names))
 
     report = build_evaluation_report(
         y_test,

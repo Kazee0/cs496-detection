@@ -57,10 +57,18 @@ def main() -> int:
 
     y_pred = clf.predict(X_test)
     print("\nClassification report:")
-    print(classification_report(y_test, y_pred, target_names=class_names))
+    print(
+        classification_report(
+            y_test,
+            y_pred,
+            labels=list(range(len(class_names))),
+            target_names=class_names,
+            zero_division=0,
+        )
+    )
 
     print("Confusion matrix:")
-    print(confusion_matrix(y_test, y_pred))
+    print(confusion_matrix(y_test, y_pred, labels=list(range(len(class_names)))))
 
     MODELS_DIR.mkdir(parents=True, exist_ok=True)
     joblib.dump({"classifier": clf, "scaler": scaler, "class_names": class_names}, MODELS_DIR / "classifier.pkl")

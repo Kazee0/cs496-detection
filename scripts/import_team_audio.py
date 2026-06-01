@@ -99,7 +99,7 @@ def import_file(source: Path, destination_dir: Path, *, dry_run: bool) -> str:
         return "skipped"
 
     if dry_run:
-        action = "convert" if source.suffix.lower() != ".wav" else "copy"
+        action = "converted" if source.suffix.lower() != ".wav" else "imported"
         print(f"  {action}: {source.name} -> {destination.name}")
         return action
 
