@@ -6,5 +6,6 @@ tensorflow
 tensorflow-hub
 setuptools<81
 scikit-learn
+joblib
 matplotlib
 streamlit
