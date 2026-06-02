@@ -38,6 +38,7 @@ from emergency_detection.config import (
     WINDOW_SAMPLES,
 )
 from emergency_detection.inference import classify_window, waveform_rms
+from emergency_detection.telegram_notifications import TelegramNotifier
 from emergency_detection.yamnet import load_yamnet_model
 
 MODELS_DIR = PROJECT_ROOT / "models"
@@ -88,6 +89,7 @@ class AppState:
         self.started: bool = False
         self.pending_alert_label: str | None = None
         self.pending_alert_count: int = 0
+        self.active_alarm_label: str | None = None
         self.last_window_rms: float = 0.0
         self.audio_chunks: int = 0
         self.inference_count: int = 0
@@ -100,7 +102,9 @@ class AppState:
 _app_state: AppState | None = None
 _audio_thread: threading.Thread | None = None
 _infer_thread: threading.Thread | None = None
+_telegram_thread: threading.Thread | None = None
 _audio_queue: queue.Queue[np.ndarray] = queue.Queue(maxsize=4)
+_telegram_notifier: TelegramNotifier | None = None
 
 
 def get_state() -> AppState:
@@ -108,6 +112,13 @@ def get_state() -> AppState:
     if _app_state is None:
         _app_state = AppState()
     return _app_state
+
+
+def get_telegram_notifier() -> TelegramNotifier:
+    global _telegram_notifier
+    if _telegram_notifier is None:
+        _telegram_notifier = TelegramNotifier()
+    return _telegram_notifier
 
 
 @st.cache_resource(show_spinner="Loading YAMNet and classifier…")
@@ -181,6 +192,7 @@ def _inference_worker(
         cooldown_ok = (now - state.last_alert_time) >= cooldown
         prediction_time = datetime.now().strftime("%H:%M:%S")
         rms = waveform_rms(snap)
+        alarm_to_send: tuple[str, float] | None = None
 
         with state.lock:
             if is_alert_candidate and label == state.pending_alert_label:
@@ -191,9 +203,11 @@ def _inference_worker(
             else:
                 state.pending_alert_label = None
                 state.pending_alert_count = 0
+                state.active_alarm_label = None
 
             is_alert = is_alert_candidate and state.pending_alert_count >= consecutive
-            should_show_alert = is_alert and cooldown_ok
+            is_new_alarm = is_alert and state.active_alarm_label != label
+            should_show_alert = is_new_alarm and cooldown_ok
             state.label = label
             state.confidence = confidence
             state.proba = proba_dict
@@ -203,6 +217,7 @@ def _inference_worker(
             state.last_prediction_time = prediction_time
             state.status_message = "Detection running."
             if should_show_alert:
+                state.active_alarm_label = label
                 state.last_alert_time = now
                 state.display_alert_until = now + ALERT_DISPLAY_HOLD_SECONDS
                 state.display_alert_label = label
@@ -215,6 +230,30 @@ def _inference_worker(
                         is_alert=True,
                     )
                 )
+                alarm_to_send = (label, confidence)
+
+        if alarm_to_send:
+            get_telegram_notifier().send_alarm(*alarm_to_send)
+
+
+def start_telegram_registration_worker(state: AppState) -> None:
+    global _telegram_thread
+    if _telegram_thread and _telegram_thread.is_alive():
+        return
+
+    notifier = get_telegram_notifier()
+
+    def telegram_run() -> None:
+        while state.started:
+            notifier.poll_register_commands()
+            time.sleep(5.0)
+
+    _telegram_thread = threading.Thread(
+        target=telegram_run,
+        daemon=True,
+        name="telegram-registration",
+    )
+    _telegram_thread.start()
 
 
 def start_detection(threshold: float, cooldown: float, consecutive: int, min_signal_rms: float) -> None:
@@ -258,6 +297,7 @@ def start_detection(threshold: float, cooldown: float, consecutive: int, min_sig
     )
     _audio_thread.start()
     _infer_thread.start()
+    start_telegram_registration_worker(state)
 
 
 def _snapshot(state: AppState) -> dict:
@@ -282,6 +322,8 @@ def _snapshot(state: AppState) -> dict:
             "pending_alert_label": state.pending_alert_label,
             "pending_alert_count": state.pending_alert_count,
             "last_window_rms": state.last_window_rms,
+            "telegram_status": get_telegram_notifier().last_status,
+            "telegram_subscribers": get_telegram_notifier().subscriber_count,
         }
 
 
@@ -442,6 +484,8 @@ def _render_diagnostics(snap: dict) -> None:
     st.write(f"Last prediction: {snap['last_prediction_time']}")
     st.write(f"Window RMS: {snap['last_window_rms']:.4f}")
     st.write(f"Alert streak: {snap['pending_alert_label'] or '—'} {snap['pending_alert_count']}")
+    st.write(f"Telegram subscribers: {snap['telegram_subscribers']}")
+    st.write(f"Telegram: {snap['telegram_status']}")
     if snap["error_message"]:
         st.error("Background worker failed.")
         st.code(snap["error_message"], language="text")
