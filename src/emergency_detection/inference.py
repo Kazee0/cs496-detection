@@ -11,6 +11,22 @@ _YAMNET_FRAME_SECONDS = 0.96
 _YAMNET_HOP_SECONDS = 0.48
 
 
+def waveform_rms(waveform: np.ndarray) -> float:
+    """Return RMS amplitude for a float waveform."""
+    if waveform.size == 0:
+        return 0.0
+    samples = waveform.astype(np.float32, copy=False)
+    return float(np.sqrt(np.mean(np.square(samples))))
+
+
+def normal_background_proba(class_names: list[str]) -> dict[str, float]:
+    """Return a deterministic normal-background probability vector."""
+    proba = {name: 0.0 for name in class_names}
+    if "normal_background" in proba:
+        proba["normal_background"] = 1.0
+    return proba
+
+
 def energy_weighted_embedding(waveform: np.ndarray, embeddings: np.ndarray) -> np.ndarray:
     """Average YAMNet frame embeddings weighted by each frame's RMS energy.
 
@@ -41,6 +57,8 @@ def classify_window(
     clf,
     scaler,
     class_names: list[str],
+    *,
+    min_signal_rms: float | None = None,
 ) -> tuple[str, float, dict[str, float]]:
     """Run full inference on a 1-second audio window.
 
@@ -51,6 +69,9 @@ def classify_window(
     giving each class a more representative embedding.
     """
     from emergency_detection.yamnet import run_yamnet
+
+    if min_signal_rms is not None and waveform_rms(waveform) < min_signal_rms:
+        return "normal_background", 1.0, normal_background_proba(class_names)
 
     output = run_yamnet(waveform, yamnet_model=yamnet_model)
     embedding = energy_weighted_embedding(waveform, output.embeddings)

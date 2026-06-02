@@ -10,6 +10,7 @@ import queue
 import sys
 import threading
 import time
+import traceback
 from collections import deque
 from dataclasses import dataclass
 from datetime import datetime
@@ -28,12 +29,15 @@ sys.path.insert(0, str(PROJECT_ROOT / "src"))
 from emergency_detection.config import (
     ALERT_LABELS,
     DEFAULT_ALERT_COOLDOWN_SECONDS,
+    DEFAULT_ALERT_CONSECUTIVE_WINDOWS,
     DEFAULT_ALERT_THRESHOLD,
+    DEFAULT_MIN_SIGNAL_RMS,
     HOP_SAMPLES,
+    LABEL_ALERT_THRESHOLDS,
     SAMPLE_RATE,
     WINDOW_SAMPLES,
 )
-from emergency_detection.inference import classify_window
+from emergency_detection.inference import classify_window, waveform_rms
 from emergency_detection.yamnet import load_yamnet_model
 
 MODELS_DIR = PROJECT_ROOT / "models"
@@ -42,6 +46,7 @@ WAVEFORM_MAXLEN = SAMPLE_RATE * WAVEFORM_SECONDS
 DISPLAY_POINTS = 800
 REFRESH_INTERVAL_S = 0.3
 LOG_MAXLEN = 15
+ALERT_DISPLAY_HOLD_SECONDS = 4.0
 
 LABEL_DISPLAY: dict[str, str] = {
     "fire_or_smoke_alarm": "Fire / Smoke Alarm",
@@ -75,9 +80,20 @@ class AppState:
         self.confidence: float = 0.0
         self.proba: dict[str, float] = {}
         self.is_alert: bool = False
+        self.display_alert_until: float = 0.0
+        self.display_alert_label: str = "—"
+        self.display_alert_confidence: float = 0.0
         self.last_alert_time: float = 0.0
         self.log: deque[LogEntry] = deque(maxlen=LOG_MAXLEN)
         self.started: bool = False
+        self.pending_alert_label: str | None = None
+        self.pending_alert_count: int = 0
+        self.last_window_rms: float = 0.0
+        self.audio_chunks: int = 0
+        self.inference_count: int = 0
+        self.last_prediction_time: str = "—"
+        self.status_message: str = "Waiting to start."
+        self.error_message: str = ""
 
 
 # Module-level singletons — persist across Streamlit reruns in the same process
@@ -105,9 +121,13 @@ def _make_audio_callback(state: AppState):
     samples_since_hop = [0]
 
     def callback(indata: np.ndarray, frames: int, time_info, status) -> None:
+        if status:
+            with state.lock:
+                state.status_message = f"Audio stream status: {status}"
         chunk = indata[:, 0].astype(np.float32)
         with state.lock:
             state.waveform.extend(chunk)
+            state.audio_chunks += 1
         samples_since_hop[0] += len(chunk)
         if samples_since_hop[0] >= HOP_SAMPLES and len(state.waveform) >= WINDOW_SAMPLES:
             samples_since_hop[0] = 0
@@ -120,8 +140,15 @@ def _make_audio_callback(state: AppState):
     return callback
 
 
-def _inference_worker(state: AppState, threshold: float, cooldown: float) -> None:
-    bundle, yamnet = load_bundle()
+def _inference_worker(
+    state: AppState,
+    threshold: float,
+    cooldown: float,
+    consecutive: int,
+    min_signal_rms: float,
+    bundle: dict,
+    yamnet,
+) -> None:
     clf = bundle["classifier"]
     scaler = bundle["scaler"]
     class_names: list[str] = bundle["class_names"]
@@ -132,56 +159,100 @@ def _inference_worker(state: AppState, threshold: float, cooldown: float) -> Non
         except queue.Empty:
             continue
 
-        label, confidence, proba_dict = classify_window(
-            snap, yamnet, clf, scaler, class_names
-        )
+        try:
+            label, confidence, proba_dict = classify_window(
+                snap,
+                yamnet,
+                clf,
+                scaler,
+                class_names,
+                min_signal_rms=min_signal_rms,
+            )
+        except Exception:
+            with state.lock:
+                state.error_message = traceback.format_exc()
+                state.status_message = "Inference failed. See error details below."
+            state.started = False
+            break
 
         now = time.time()
-        is_alert = label in ALERT_LABELS and confidence >= threshold
+        label_threshold = LABEL_ALERT_THRESHOLDS.get(label, threshold)
+        is_alert_candidate = label in ALERT_LABELS and confidence >= label_threshold
         cooldown_ok = (now - state.last_alert_time) >= cooldown
-
-        entry = LogEntry(
-            time_str=datetime.now().strftime("%H:%M:%S"),
-            label=label,
-            confidence=confidence,
-            is_alert=is_alert,
-        )
+        prediction_time = datetime.now().strftime("%H:%M:%S")
+        rms = waveform_rms(snap)
 
         with state.lock:
+            if is_alert_candidate and label == state.pending_alert_label:
+                state.pending_alert_count += 1
+            elif is_alert_candidate:
+                state.pending_alert_label = label
+                state.pending_alert_count = 1
+            else:
+                state.pending_alert_label = None
+                state.pending_alert_count = 0
+
+            is_alert = is_alert_candidate and state.pending_alert_count >= consecutive
+            should_show_alert = is_alert and cooldown_ok
             state.label = label
             state.confidence = confidence
             state.proba = proba_dict
-            state.is_alert = is_alert and cooldown_ok
-            if is_alert and cooldown_ok:
+            state.is_alert = should_show_alert or now < state.display_alert_until
+            state.inference_count += 1
+            state.last_window_rms = rms
+            state.last_prediction_time = prediction_time
+            state.status_message = "Detection running."
+            if should_show_alert:
                 state.last_alert_time = now
-            state.log.appendleft(entry)
+                state.display_alert_until = now + ALERT_DISPLAY_HOLD_SECONDS
+                state.display_alert_label = label
+                state.display_alert_confidence = confidence
+                state.log.appendleft(
+                    LogEntry(
+                        time_str=prediction_time,
+                        label=label,
+                        confidence=confidence,
+                        is_alert=True,
+                    )
+                )
 
 
-def start_detection(threshold: float, cooldown: float) -> None:
+def start_detection(threshold: float, cooldown: float, consecutive: int, min_signal_rms: float) -> None:
     global _audio_thread, _infer_thread
     state = get_state()
     if state.started:
         return
     state.started = True
-    load_bundle()
+    with state.lock:
+        state.status_message = "Loading model and starting microphone..."
+        state.error_message = ""
+    bundle, yamnet = load_bundle()
 
     callback = _make_audio_callback(state)
 
     def audio_run() -> None:
-        with sd.InputStream(
-            samplerate=SAMPLE_RATE,
-            channels=1,
-            dtype="float32",
-            blocksize=HOP_SAMPLES,
-            callback=callback,
-        ):
-            while state.started:
-                time.sleep(0.05)
+        try:
+            with sd.InputStream(
+                samplerate=SAMPLE_RATE,
+                channels=1,
+                dtype="float32",
+                blocksize=HOP_SAMPLES,
+                callback=callback,
+            ):
+                with state.lock:
+                    state.status_message = "Microphone stream running."
+                while state.started:
+                    time.sleep(0.05)
+        except Exception:
+            with state.lock:
+                state.error_message = traceback.format_exc()
+                state.status_message = "Audio stream failed. Check microphone permissions/device."
+            state.started = False
 
     _audio_thread = threading.Thread(target=audio_run, daemon=True, name="audio-capture")
     _infer_thread = threading.Thread(
         target=_inference_worker,
-        args=(state, threshold, cooldown),
+        args=(state, threshold, cooldown, consecutive, min_signal_rms, bundle, yamnet),
         daemon=True,
         name="inference",
     )
@@ -191,13 +262,26 @@ def start_detection(threshold: float, cooldown: float) -> None:
 
 def _snapshot(state: AppState) -> dict:
     with state.lock:
+        now = time.time()
+        display_alert_active = now < state.display_alert_until
         return {
             "waveform": list(state.waveform),
             "label": state.label,
             "confidence": state.confidence,
             "proba": dict(state.proba),
-            "is_alert": state.is_alert,
+            "is_alert": display_alert_active,
+            "alert_label": state.display_alert_label if display_alert_active else state.label,
+            "alert_confidence": state.display_alert_confidence if display_alert_active else state.confidence,
             "log": list(state.log),
+            "started": state.started,
+            "audio_chunks": state.audio_chunks,
+            "inference_count": state.inference_count,
+            "last_prediction_time": state.last_prediction_time,
+            "status_message": state.status_message,
+            "error_message": state.error_message,
+            "pending_alert_label": state.pending_alert_label,
+            "pending_alert_count": state.pending_alert_count,
+            "last_window_rms": state.last_window_rms,
         }
 
 
@@ -205,8 +289,8 @@ def _snapshot(state: AppState) -> dict:
 
 def _render_status(snap: dict) -> None:
     is_alert = snap["is_alert"]
-    label = snap["label"]
-    confidence = snap["confidence"]
+    label = snap["alert_label"] if is_alert else snap["label"]
+    confidence = snap["alert_confidence"] if is_alert else snap["confidence"]
     display_label = LABEL_DISPLAY.get(label, label)
     color = "#ff3333" if is_alert else "#22cc66"
 
@@ -343,12 +427,24 @@ def _render_event_log(snap: dict) -> None:
     for entry in log:
         rows.append({
             "Time": entry.time_str,
-            "Alert": "🚨" if entry.is_alert else "",
             "Class": LABEL_DISPLAY.get(entry.label, entry.label),
             "Confidence": f"{entry.confidence:.0%}",
         })
     df = pd.DataFrame(rows)
     st.dataframe(df, use_container_width=True, hide_index=True, height=min(320, 44 + 35 * len(rows)))
+
+
+def _render_diagnostics(snap: dict) -> None:
+    st.caption("Runtime")
+    st.write(f"Status: {snap['status_message']}")
+    st.write(f"Audio chunks: {snap['audio_chunks']}")
+    st.write(f"Predictions: {snap['inference_count']}")
+    st.write(f"Last prediction: {snap['last_prediction_time']}")
+    st.write(f"Window RMS: {snap['last_window_rms']:.4f}")
+    st.write(f"Alert streak: {snap['pending_alert_label'] or '—'} {snap['pending_alert_count']}")
+    if snap["error_message"]:
+        st.error("Background worker failed.")
+        st.code(snap["error_message"], language="text")
 
 
 # ── Main ───────────────────────────────────────────────────────────────────────
@@ -370,6 +466,14 @@ def main() -> None:
             "Cooldown (s)", 0.0, 10.0, DEFAULT_ALERT_COOLDOWN_SECONDS, 0.5,
             help="Minimum seconds between repeated alerts.",
         )
+        consecutive = st.slider(
+            "Consecutive windows", 1, 6, DEFAULT_ALERT_CONSECUTIVE_WINDOWS, 1,
+            help="How many matching emergency windows are required before showing an alert.",
+        )
+        min_signal_rms = st.slider(
+            "Min signal RMS", 0.0, 0.10, DEFAULT_MIN_SIGNAL_RMS, 0.005,
+            help="Optional quiet-window filter. Keep at 0.0 to disable.",
+        )
         st.divider()
         st.caption("Target classes")
         for key, display in LABEL_DISPLAY.items():
@@ -378,11 +482,13 @@ def main() -> None:
                 f"<span style='color:{color};font-size:1.1rem;'>■</span> {display}",
                 unsafe_allow_html=True,
             )
+        st.divider()
+        diagnostics_ph = st.empty()
 
     st.title("🚨 Emergency Sound Detection")
     st.caption("Real-time microphone classification via YAMNet + logistic regression.")
 
-    start_detection(threshold, cooldown)
+    start_detection(threshold, cooldown, consecutive, min_signal_rms)
 
     # Persistent placeholder containers
     status_ph = st.empty()
@@ -395,7 +501,7 @@ def main() -> None:
     with col_r:
         st.markdown("##### Class Confidence")
         bars_ph = st.empty()
-    st.markdown("##### Recent Events")
+    st.markdown("##### Recent Alarms")
     log_ph = st.empty()
 
     # Render loop — updates placeholders every REFRESH_INTERVAL_S
@@ -412,6 +518,8 @@ def main() -> None:
             _render_confidence_bars(snap)
         with log_ph.container():
             _render_event_log(snap)
+        with diagnostics_ph.container():
+            _render_diagnostics(snap)
 
         time.sleep(REFRESH_INTERVAL_S)
 
