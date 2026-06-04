@@ -13,7 +13,8 @@ from sklearn.metrics import (
     precision_recall_fscore_support,
 )
 
-from emergency_detection.config import ALERT_LABELS
+from emergency_detection.config import ALERT_LABELS, LABEL_ALERT_THRESHOLDS
+from emergency_detection.inference import predict_with_class_thresholds
 
 
 @dataclass(frozen=True)
@@ -55,10 +56,12 @@ def emergency_alert_rate(
     class_names: list[str],
     *,
     threshold: float,
+    class_thresholds: dict[str, float] | None = None,
 ) -> tuple[float, float]:
     """Return (emergency recall, normal false positive rate) using alert rules."""
     emergency_indices = _emergency_label_indices(class_names)
     normal_index = _normal_label_index(class_names)
+    class_thresholds = class_thresholds or LABEL_ALERT_THRESHOLDS
 
     if not emergency_indices:
         return 0.0, 0.0
@@ -67,10 +70,13 @@ def emergency_alert_rate(
     if emergency_true.any():
         triggered = []
         for index in np.where(emergency_true)[0]:
-            label_index = int(np.argmax(y_proba[index]))
-            label = class_names[label_index]
-            confidence = float(y_proba[index, label_index])
-            triggered.append(label in ALERT_LABELS and confidence >= threshold)
+            proba = {name: float(y_proba[index, i]) for i, name in enumerate(class_names)}
+            label, confidence = predict_with_class_thresholds(
+                proba,
+                default_threshold=threshold,
+                class_thresholds=class_thresholds,
+            )
+            triggered.append(label in ALERT_LABELS)
         emergency_recall = float(np.mean(triggered))
     else:
         emergency_recall = 0.0
@@ -81,10 +87,13 @@ def emergency_alert_rate(
         if normal_mask.any():
             false_alarms = []
             for index in np.where(normal_mask)[0]:
-                label_index = int(np.argmax(y_proba[index]))
-                label = class_names[label_index]
-                confidence = float(y_proba[index, label_index])
-                false_alarms.append(label in ALERT_LABELS and confidence >= threshold)
+                proba = {name: float(y_proba[index, i]) for i, name in enumerate(class_names)}
+                label, confidence = predict_with_class_thresholds(
+                    proba,
+                    default_threshold=threshold,
+                    class_thresholds=class_thresholds,
+                )
+                false_alarms.append(label in ALERT_LABELS)
             normal_fpr = float(np.mean(false_alarms))
 
     return emergency_recall, normal_fpr
@@ -97,6 +106,7 @@ def build_evaluation_report(
     class_names: list[str],
     *,
     alert_threshold: float | None = None,
+    class_thresholds: dict[str, float] | None = None,
 ) -> EvaluationReport:
     precision, recall, f1, _ = precision_recall_fscore_support(
         y_true,
@@ -127,7 +137,12 @@ def build_evaluation_report(
 
     if alert_threshold is not None:
         threshold_recall, threshold_fpr = emergency_alert_rate(
-            y_true, y_pred, y_proba, class_names, threshold=alert_threshold
+            y_true,
+            y_pred,
+            y_proba,
+            class_names,
+            threshold=alert_threshold,
+            class_thresholds=class_thresholds,
         )
         emergency_recall = threshold_recall
         normal_fpr = threshold_fpr

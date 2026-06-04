@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import numpy as np
 
-from emergency_detection.config import SAMPLE_RATE
+from emergency_detection.config import ALERT_LABELS, LABEL_ALERT_THRESHOLDS, SAMPLE_RATE
 
 # YAMNet frame parameters (fixed by the model architecture)
 _YAMNET_FRAME_SECONDS = 0.96
@@ -25,6 +25,38 @@ def normal_background_proba(class_names: list[str]) -> dict[str, float]:
     if "normal_background" in proba:
         proba["normal_background"] = 1.0
     return proba
+
+
+def predict_with_class_thresholds(
+    proba: dict[str, float],
+    *,
+    default_threshold: float | None = None,
+    emergency_labels: set[str] | None = None,
+    class_thresholds: dict[str, float] | None = None,
+) -> tuple[str, float]:
+    """Choose a label using lower per-class thresholds for emergency labels."""
+    if not proba:
+        return "—", 0.0
+
+    emergency_labels = emergency_labels or ALERT_LABELS
+    class_thresholds = class_thresholds or LABEL_ALERT_THRESHOLDS
+
+    candidates: list[tuple[float, float, str, float]] = []
+    for label, confidence in proba.items():
+        if label not in emergency_labels:
+            continue
+        threshold = class_thresholds.get(label, default_threshold)
+        if threshold is None or confidence < threshold:
+            continue
+        margin = confidence - threshold
+        candidates.append((margin, confidence, label, threshold))
+
+    if candidates:
+        _, confidence, label, _ = max(candidates)
+        return label, float(confidence)
+
+    label, confidence = max(proba.items(), key=lambda item: item[1])
+    return label, float(confidence)
 
 
 def energy_weighted_embedding(waveform: np.ndarray, embeddings: np.ndarray) -> np.ndarray:
@@ -59,6 +91,7 @@ def classify_window(
     class_names: list[str],
     *,
     min_signal_rms: float | None = None,
+    class_thresholds: dict[str, float] | None = None,
 ) -> tuple[str, float, dict[str, float]]:
     """Run full inference on a 1-second audio window.
 
@@ -84,9 +117,9 @@ def classify_window(
         if 0 <= int(class_i) < len(class_names):
             proba[class_names[int(class_i)]] = float(raw_proba[col_i])
 
-    best_col = int(np.argmax(raw_proba))
-    best_class = int(clf.classes_[best_col])
-    label = class_names[best_class] if 0 <= best_class < len(class_names) else "—"
-    confidence = float(raw_proba[best_col])
+    label, confidence = predict_with_class_thresholds(
+        proba,
+        class_thresholds=class_thresholds,
+    )
 
     return label, confidence, proba

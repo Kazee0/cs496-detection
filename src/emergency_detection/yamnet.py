@@ -6,8 +6,6 @@ import csv
 from dataclasses import dataclass
 
 import numpy as np
-import tensorflow as tf
-import tensorflow_hub as hub
 
 
 YAMNET_MODEL_HANDLE = "https://tfhub.dev/google/yamnet/1"
@@ -25,6 +23,8 @@ class YamnetOutput:
 
 def load_yamnet_model():
     """Load the pretrained YAMNet model from TensorFlow Hub."""
+    import tensorflow_hub as hub
+
     return hub.load(YAMNET_MODEL_HANDLE)
 
 
@@ -38,6 +38,8 @@ def load_yamnet_class_names(yamnet_model) -> list[str]:
 
 def run_yamnet(waveform: np.ndarray, yamnet_model=None) -> YamnetOutput:
     """Run YAMNet on a mono waveform and return scores, embeddings, and spectrogram."""
+    import tensorflow as tf
+
     model = yamnet_model or load_yamnet_model()
     waveform_tensor = tf.convert_to_tensor(waveform, dtype=tf.float32)
     scores, embeddings, spectrogram = model(waveform_tensor)

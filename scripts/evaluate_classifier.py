@@ -20,12 +20,13 @@ from sklearn.model_selection import train_test_split
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(PROJECT_ROOT / "src"))
 
-from emergency_detection.config import DEFAULT_ALERT_THRESHOLD
+from emergency_detection.config import DEFAULT_ALERT_THRESHOLD, LABEL_ALERT_THRESHOLDS
 from emergency_detection.evaluation import (
     build_evaluation_report,
     format_report_text,
     sklearn_classification_report_text,
 )
+from emergency_detection.inference import predict_with_class_thresholds
 
 PROCESSED_DIR = PROJECT_ROOT / "data" / "processed"
 MODELS_DIR = PROJECT_ROOT / "models"
@@ -118,6 +119,23 @@ def predict_proba_by_class(clf, X_test_scaled: np.ndarray, class_count: int) -> 
     return proba
 
 
+def predict_with_thresholds(
+    y_proba: np.ndarray,
+    class_names: list[str],
+    class_thresholds: dict[str, float],
+) -> np.ndarray:
+    predictions: list[int] = []
+    for row in y_proba:
+        proba = {name: float(row[index]) for index, name in enumerate(class_names)}
+        label, _ = predict_with_class_thresholds(
+            proba,
+            default_threshold=DEFAULT_ALERT_THRESHOLD,
+            class_thresholds=class_thresholds,
+        )
+        predictions.append(class_names.index(label) if label in class_names else int(np.argmax(row)))
+    return np.array(predictions, dtype=np.int32)
+
+
 def main() -> int:
     args = parse_args()
 
@@ -133,6 +151,7 @@ def main() -> int:
     bundle = joblib.load(model_path)
     clf = bundle["classifier"]
     scaler = bundle["scaler"]
+    class_thresholds = bundle.get("class_thresholds", LABEL_ALERT_THRESHOLDS)
 
     X_test, y_test, _ = load_test_split(
         embeddings,
@@ -141,8 +160,8 @@ def main() -> int:
         random_state=args.random_state,
     )
     X_test_scaled = scaler.transform(X_test)
-    y_pred = clf.predict(X_test_scaled)
     y_proba = predict_proba_by_class(clf, X_test_scaled, len(class_names))
+    y_pred = predict_with_thresholds(y_proba, class_names, class_thresholds)
 
     report = build_evaluation_report(
         y_test,
@@ -150,6 +169,7 @@ def main() -> int:
         y_proba,
         class_names,
         alert_threshold=args.threshold,
+        class_thresholds=class_thresholds,
     )
 
     print(format_report_text(report))

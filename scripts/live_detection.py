@@ -54,7 +54,12 @@ def load_model(models_dir: Path):
         print("Run scripts/train_classifier.py first.")
         sys.exit(1)
     data = joblib.load(model_path)
-    return data["classifier"], data["scaler"], data["class_names"]
+    return (
+        data["classifier"],
+        data["scaler"],
+        data["class_names"],
+        data.get("class_thresholds", LABEL_ALERT_THRESHOLDS),
+    )
 
 
 
@@ -63,7 +68,7 @@ def main() -> int:
     args = parse_args()
 
     print("Loading classifier...")
-    clf, scaler, class_names = load_model(MODELS_DIR)
+    clf, scaler, class_names, class_thresholds = load_model(MODELS_DIR)
     print(f"Classes: {class_names}")
 
     print("Loading YAMNet...")
@@ -103,6 +108,7 @@ def main() -> int:
             scaler,
             class_names,
             min_signal_rms=args.min_rms,
+            class_thresholds=class_thresholds,
         )
 
         now = time.time()

@@ -7,6 +7,7 @@ Usage:
 from __future__ import annotations
 
 import queue
+import multiprocessing as mp
 import sys
 import threading
 import time
@@ -16,7 +17,6 @@ from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 
-import joblib
 import numpy as np
 import pandas as pd
 import sounddevice as sd
@@ -37,9 +37,8 @@ from emergency_detection.config import (
     SAMPLE_RATE,
     WINDOW_SAMPLES,
 )
-from emergency_detection.inference import classify_window, waveform_rms
 from emergency_detection.telegram_notifications import TelegramNotifier
-from emergency_detection.yamnet import load_yamnet_model
+from emergency_detection.model_worker import run_model_worker
 
 MODELS_DIR = PROJECT_ROOT / "models"
 WAVEFORM_SECONDS = 3
@@ -96,6 +95,7 @@ class AppState:
         self.last_prediction_time: str = "—"
         self.status_message: str = "Waiting to start."
         self.error_message: str = ""
+        self.model_load_started_at: float = 0.0
 
 
 # Module-level singletons — persist across Streamlit reruns in the same process
@@ -103,8 +103,11 @@ _app_state: AppState | None = None
 _audio_thread: threading.Thread | None = None
 _infer_thread: threading.Thread | None = None
 _telegram_thread: threading.Thread | None = None
-_audio_queue: queue.Queue[np.ndarray] = queue.Queue(maxsize=4)
 _telegram_notifier: TelegramNotifier | None = None
+_model_process: mp.Process | None = None
+_model_input_queue: mp.Queue | None = None
+_model_output_queue: mp.Queue | None = None
+_model_mp_context = mp.get_context("spawn")
 
 
 def get_state() -> AppState:
@@ -119,13 +122,6 @@ def get_telegram_notifier() -> TelegramNotifier:
     if _telegram_notifier is None:
         _telegram_notifier = TelegramNotifier()
     return _telegram_notifier
-
-
-@st.cache_resource(show_spinner="Loading YAMNet and classifier…")
-def load_bundle() -> tuple:
-    bundle = joblib.load(MODELS_DIR / "classifier.pkl")
-    yamnet = load_yamnet_model()
-    return bundle, yamnet
 
 
 def _make_audio_callback(state: AppState):
@@ -143,10 +139,11 @@ def _make_audio_callback(state: AppState):
         if samples_since_hop[0] >= HOP_SAMPLES and len(state.waveform) >= WINDOW_SAMPLES:
             samples_since_hop[0] = 0
             snap = np.array(list(state.waveform)[-WINDOW_SAMPLES:], dtype=np.float32)
-            try:
-                _audio_queue.put_nowait(snap)
-            except queue.Full:
-                pass
+            if _model_input_queue is not None:
+                try:
+                    _model_input_queue.put_nowait(snap)
+                except queue.Full:
+                    pass
 
     return callback
 
@@ -156,43 +153,45 @@ def _inference_worker(
     threshold: float,
     cooldown: float,
     consecutive: int,
-    min_signal_rms: float,
-    bundle: dict,
-    yamnet,
 ) -> None:
-    clf = bundle["classifier"]
-    scaler = bundle["scaler"]
-    class_names: list[str] = bundle["class_names"]
-
     while state.started:
-        try:
-            snap = _audio_queue.get(timeout=0.5)
-        except queue.Empty:
+        if _model_output_queue is None:
+            time.sleep(0.1)
             continue
 
         try:
-            label, confidence, proba_dict = classify_window(
-                snap,
-                yamnet,
-                clf,
-                scaler,
-                class_names,
-                min_signal_rms=min_signal_rms,
-            )
-        except Exception:
+            message = _model_output_queue.get(timeout=0.5)
+        except queue.Empty:
+            continue
+
+        message_type = message.get("type")
+        if message_type == "status":
             with state.lock:
-                state.error_message = traceback.format_exc()
-                state.status_message = "Inference failed. See error details below."
+                state.status_message = message.get("message", "Model worker starting.")
+            continue
+        if message_type == "ready":
+            with state.lock:
+                state.status_message = "Model worker ready. Starting microphone..."
+            continue
+        if message_type == "error":
+            with state.lock:
+                state.error_message = message.get("traceback") or message.get("message", "Model worker failed.")
+                state.status_message = message.get("message", "Model worker failed.")
             state.started = False
             break
+        if message_type != "prediction":
+            continue
 
+        label = message["label"]
+        confidence = float(message["confidence"])
+        proba_dict = message["proba"]
         now = time.time()
         label_threshold = LABEL_ALERT_THRESHOLDS.get(label, threshold)
         is_alert_candidate = label in ALERT_LABELS and confidence >= label_threshold
         cooldown_ok = (now - state.last_alert_time) >= cooldown
         prediction_time = datetime.now().strftime("%H:%M:%S")
-        rms = waveform_rms(snap)
         alarm_to_send: tuple[str, float] | None = None
+        rms = float(message.get("rms", 0.0))
 
         with state.lock:
             if is_alert_candidate and label == state.pending_alert_label:
@@ -257,15 +256,26 @@ def start_telegram_registration_worker(state: AppState) -> None:
 
 
 def start_detection(threshold: float, cooldown: float, consecutive: int, min_signal_rms: float) -> None:
-    global _audio_thread, _infer_thread
+    global _audio_thread, _infer_thread, _model_process, _model_input_queue, _model_output_queue
     state = get_state()
     if state.started:
         return
+
     state.started = True
     with state.lock:
-        state.status_message = "Loading model and starting microphone..."
+        state.status_message = "Starting isolated model worker..."
         state.error_message = ""
-    bundle, yamnet = load_bundle()
+        state.model_load_started_at = time.time()
+
+    _model_input_queue = _model_mp_context.Queue(maxsize=4)
+    _model_output_queue = _model_mp_context.Queue(maxsize=16)
+    _model_process = _model_mp_context.Process(
+        target=run_model_worker,
+        args=(_model_input_queue, _model_output_queue, str(MODELS_DIR), min_signal_rms),
+        daemon=True,
+        name="yamnet-model-worker",
+    )
+    _model_process.start()
 
     callback = _make_audio_callback(state)
 
@@ -279,7 +289,7 @@ def start_detection(threshold: float, cooldown: float, consecutive: int, min_sig
                 callback=callback,
             ):
                 with state.lock:
-                    state.status_message = "Microphone stream running."
+                    state.status_message = "Microphone stream running; waiting for model worker..."
                 while state.started:
                     time.sleep(0.05)
         except Exception:
@@ -291,9 +301,9 @@ def start_detection(threshold: float, cooldown: float, consecutive: int, min_sig
     _audio_thread = threading.Thread(target=audio_run, daemon=True, name="audio-capture")
     _infer_thread = threading.Thread(
         target=_inference_worker,
-        args=(state, threshold, cooldown, consecutive, min_signal_rms, bundle, yamnet),
+        args=(state, threshold, cooldown, consecutive),
         daemon=True,
-        name="inference",
+        name="model-results",
     )
     _audio_thread.start()
     _infer_thread.start()
@@ -303,6 +313,38 @@ def start_detection(threshold: float, cooldown: float, consecutive: int, min_sig
 def _snapshot(state: AppState) -> dict:
     with state.lock:
         now = time.time()
+        loading_timed_out = (
+            state.started
+            and state.inference_count == 0
+            and state.model_load_started_at
+            and state.status_message in {
+                "Starting isolated model worker...",
+                "Worker loading classifier...",
+                "Worker loading YAMNet...",
+                "Microphone stream running; waiting for model worker...",
+                "Model worker ready. Starting microphone...",
+            }
+            and now - state.model_load_started_at > 20
+        )
+        worker_exited = (
+            state.started
+            and _model_process is not None
+            and _model_process.exitcode is not None
+            and _model_process.exitcode != 0
+        )
+        if loading_timed_out:
+            state.started = False
+            state.status_message = "Model worker startup timed out."
+            state.error_message = (
+                "The isolated TensorFlow/YAMNet worker did not produce predictions within 20 seconds. "
+                "Streamlit is still responsive, so the hang has been isolated outside the UI process."
+            )
+            if _model_process is not None and _model_process.is_alive():
+                _model_process.terminate()
+        elif worker_exited:
+            state.started = False
+            state.status_message = "Model worker exited."
+            state.error_message = f"Model worker exited with code {_model_process.exitcode}."
         display_alert_active = now < state.display_alert_until
         return {
             "waveform": list(state.waveform),
@@ -532,7 +574,9 @@ def main() -> None:
     st.title("🚨 Emergency Sound Detection")
     st.caption("Real-time microphone classification via YAMNet + logistic regression.")
 
-    start_detection(threshold, cooldown, consecutive, min_signal_rms)
+    state = get_state()
+    if st.button("Start Detection", disabled=state.started):
+        start_detection(threshold, cooldown, consecutive, min_signal_rms)
 
     # Persistent placeholder containers
     status_ph = st.empty()
@@ -548,24 +592,24 @@ def main() -> None:
     st.markdown("##### Recent Alarms")
     log_ph = st.empty()
 
-    # Render loop — updates placeholders every REFRESH_INTERVAL_S
-    while True:
-        snap = _snapshot(get_state())
+    snap = _snapshot(get_state())
 
-        with status_ph.container():
-            _render_status(snap)
-        with waveform_ph.container():
-            _render_waveform(snap)
-        with detection_ph.container():
-            _render_detection(snap)
-        with bars_ph.container():
-            _render_confidence_bars(snap)
-        with log_ph.container():
-            _render_event_log(snap)
-        with diagnostics_ph.container():
-            _render_diagnostics(snap)
+    with status_ph.container():
+        _render_status(snap)
+    with waveform_ph.container():
+        _render_waveform(snap)
+    with detection_ph.container():
+        _render_detection(snap)
+    with bars_ph.container():
+        _render_confidence_bars(snap)
+    with log_ph.container():
+        _render_event_log(snap)
+    with diagnostics_ph.container():
+        _render_diagnostics(snap)
 
+    if snap["started"]:
         time.sleep(REFRESH_INTERVAL_S)
+        st.rerun()
 
 
 if __name__ == "__main__":

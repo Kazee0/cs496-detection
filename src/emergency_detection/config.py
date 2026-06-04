@@ -26,5 +26,8 @@ DEFAULT_ALERT_COOLDOWN_SECONDS = 3.0
 DEFAULT_ALERT_CONSECUTIVE_WINDOWS = 3
 DEFAULT_MIN_SIGNAL_RMS = 0.0
 LABEL_ALERT_THRESHOLDS = {
-    "fire_or_smoke_alarm": 0.90,
+    "fire_or_smoke_alarm": 0.30,
+    "glass_breaking": 0.35,
+    "scream": 0.35,
+    "siren": 0.40,
 }
