@@ -75,9 +75,10 @@ def main() -> int:
     last_alert_time = 0.0
     pending_alert_label: str | None = None
     pending_alert_count = 0
+    active_alarm_label: str | None = None
 
     def audio_callback(indata: np.ndarray, frames: int, time_info, status) -> None:
-        nonlocal samples_since_hop, last_alert_time, pending_alert_label, pending_alert_count
+        nonlocal samples_since_hop, last_alert_time, pending_alert_label, pending_alert_count, active_alarm_label
 
         if status:
             print(f"[stream status] {status}", file=sys.stderr)
@@ -115,11 +116,14 @@ def main() -> int:
         else:
             pending_alert_label = None
             pending_alert_count = 0
+            active_alarm_label = None
 
         is_alert = is_alert_candidate and pending_alert_count >= args.consecutive
+        is_new_alarm = is_alert and active_alarm_label != label
         cooldown_ok = (now - last_alert_time) >= args.cooldown
 
-        if is_alert and cooldown_ok:
+        if is_new_alarm and cooldown_ok:
+            active_alarm_label = label
             last_alert_time = now
             print(f"*** ALERT *** {label.upper()} ({confidence:.0%}, rms={rms:.4f}, {pending_alert_count} windows)", flush=True)
         else:
