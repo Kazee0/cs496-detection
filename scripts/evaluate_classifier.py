@@ -15,7 +15,6 @@ from pathlib import Path
 import joblib
 import matplotlib.pyplot as plt
 import numpy as np
-from sklearn.model_selection import train_test_split
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(PROJECT_ROOT / "src"))
@@ -31,6 +30,7 @@ from emergency_detection.inference import predict_with_class_thresholds
 PROCESSED_DIR = PROJECT_ROOT / "data" / "processed"
 MODELS_DIR = PROJECT_ROOT / "models"
 OUTPUTS_DIR = PROJECT_ROOT / "outputs"
+TEST_SAMPLES_PER_CLASS = 8
 
 
 def parse_args() -> argparse.Namespace:
@@ -79,14 +79,18 @@ def load_test_split(
         test_indices = np.load(indices_path)
         return embeddings[test_indices], labels[test_indices], test_indices
 
-    _, X_test, _, y_test = train_test_split(
-        embeddings,
-        labels,
-        test_size=test_size,
-        random_state=random_state,
-        stratify=labels,
-    )
-    return X_test, y_test, np.array([], dtype=np.int64)
+    rng = np.random.default_rng(random_state)
+    test_parts: list[np.ndarray] = []
+    for class_index in range(int(labels.max()) + 1):
+        class_indices = np.flatnonzero(labels == class_index)
+        if class_indices.size == 0:
+            continue
+        shuffled = rng.permutation(class_indices)
+        test_count = min(TEST_SAMPLES_PER_CLASS, max(1, class_indices.size - 1))
+        test_parts.append(shuffled[:test_count])
+
+    test_indices = rng.permutation(np.concatenate(test_parts))
+    return embeddings[test_indices], labels[test_indices], test_indices
 
 
 def save_confusion_plot(report, output_path: Path) -> None:

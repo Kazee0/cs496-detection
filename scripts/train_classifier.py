@@ -35,6 +35,7 @@ MAX_NORMAL_FALSE_ALARM_RATE = 0.10
 EMERGENCY_MIN_THRESHOLD = 0.05
 EMERGENCY_MAX_THRESHOLD = 0.75
 EMERGENCY_THRESHOLD_STEP = 0.05
+TEST_SAMPLES_PER_CLASS = 8
 
 
 def proba_by_class(clf, X_scaled: np.ndarray, class_count: int) -> np.ndarray:
@@ -44,6 +45,35 @@ def proba_by_class(clf, X_scaled: np.ndarray, class_count: int) -> np.ndarray:
         if 0 <= int(class_index) < class_count:
             proba[:, int(class_index)] = raw_proba[:, column_index]
     return proba
+
+
+def make_balanced_test_split(
+    labels: np.ndarray,
+    class_names: list[str],
+    *,
+    samples_per_class: int,
+    random_state: int,
+) -> tuple[np.ndarray, np.ndarray]:
+    """Return train/test indices with a capped, class-balanced test set."""
+    rng = np.random.default_rng(random_state)
+    test_parts: list[np.ndarray] = []
+    train_parts: list[np.ndarray] = []
+
+    for class_index, class_name in enumerate(class_names):
+        class_indices = np.flatnonzero(labels == class_index)
+        if class_indices.size == 0:
+            print(f"  split warning: no samples for {class_name}")
+            continue
+
+        shuffled = rng.permutation(class_indices)
+        test_count = min(samples_per_class, max(1, class_indices.size - 1))
+        test_parts.append(shuffled[:test_count])
+        train_parts.append(shuffled[test_count:])
+        print(f"  test split: {class_name}={test_count}")
+
+    test_indices = np.concatenate(test_parts)
+    train_indices = np.concatenate(train_parts)
+    return rng.permutation(train_indices), rng.permutation(test_indices)
 
 
 def predict_with_thresholds(
@@ -194,12 +224,11 @@ def main() -> int:
 
     print(f"Loaded {embeddings.shape[0]} samples, {len(class_names)} classes: {class_names}")
 
-    indices = np.arange(len(labels))
-    train_indices, test_indices = train_test_split(
-        indices,
-        test_size=0.2,
+    train_indices, test_indices = make_balanced_test_split(
+        labels,
+        class_names,
+        samples_per_class=TEST_SAMPLES_PER_CLASS,
         random_state=RANDOM_STATE,
-        stratify=labels,
     )
     fit_indices, val_indices = train_test_split(
         train_indices,
